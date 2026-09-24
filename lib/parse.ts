@@ -48,6 +48,16 @@ function parseMoney(raw: string): number {
   return Number.parseFloat(raw.replace(/[$,]/g, ""));
 }
 
+/** Classify a totals label ("Subtotal:", "GST (15%):", "Total:", …). */
+function totalsKind(label: string): "subtotal" | "gst" | "total" | null {
+  const lower = label.toLowerCase().trim();
+  if (lower.startsWith("subtotal")) return "subtotal";
+  if (lower.startsWith("gst")) return "gst";
+  if (lower.startsWith("total (incl gst)")) return "total";
+  if (lower === "total" || lower === "total:") return "total";
+  return null;
+}
+
 function parseQty(raw: string): number {
   return Number.parseInt(raw.replace(/,/g, ""), 10);
 }
@@ -162,6 +172,11 @@ export function parsePage(page: number, text: string): ParsedPage {
   let i = rowStart;
   while (i < tokens.length) {
     const token = tokens[i];
+    // Decorative rule lines (e.g. under the header) are neither rows nor footers.
+    if (/^-{3,}$/.test(token)) {
+      i += 1;
+      continue;
+    }
     if (isFooterToken(token)) break;
     if (!CODE_RE.test(token)) {
       i += 1;
@@ -219,24 +234,38 @@ export function parsePage(page: number, text: string): ParsedPage {
     i += width;
   }
 
-  // Totals live in the footer region.
+  // Totals live in the footer region. Labels and values may arrive as two
+  // tokens ("Total:" + "$2,050.00") or one ("Total: $2,050.00").
   for (let k = i; k < tokens.length; k += 1) {
     const token = tokens[k];
     const next = tokens[k + 1];
-    if (next === undefined || !MONEY_RE.test(next)) continue;
-    const lower = token.toLowerCase();
-    if (lower.startsWith("subtotal")) {
-      parsed.totals.subtotal = traced(next, parseMoney(next), page, token + "\n" + next);
-      parsed.totalsSources.push(token);
-    } else if (lower.startsWith("gst")) {
-      parsed.totals.gst = traced(next, parseMoney(next), page, token + "\n" + next);
-      parsed.totalsSources.push(token);
-    } else if (lower.startsWith("total (incl gst)")) {
-      parsed.totals.total = traced(next, parseMoney(next), page, token + "\n" + next);
-      parsed.totalsSources.push(token);
-    } else if (lower === "total:" || lower.startsWith("total:")) {
-      parsed.totals.total = traced(next, parseMoney(next), page, token + "\n" + next);
-      parsed.totalsSources.push(token);
+    let label: string | null = null;
+    let moneyRaw: string | null = null;
+    const combined = token.match(/^(.*?)\s+(\$[\d,]+\.\d{2})$/);
+    if (combined && totalsKind(combined[1])) {
+      label = combined[1];
+      moneyRaw = combined[2];
+    } else if (
+      next !== undefined &&
+      MONEY_RE.test(next) &&
+      totalsKind(token)
+    ) {
+      label = token;
+      moneyRaw = next;
+    }
+    if (!label || !moneyRaw) continue;
+    const kind = totalsKind(label);
+    const sourceText =
+      moneyRaw === next ? label + "\n" + moneyRaw : token;
+    if (kind === "subtotal" && !parsed.totals.subtotal) {
+      parsed.totals.subtotal = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
+      parsed.totalsSources.push(label);
+    } else if (kind === "gst" && !parsed.totals.gst) {
+      parsed.totals.gst = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
+      parsed.totalsSources.push(label);
+    } else if (kind === "total" && !parsed.totals.total) {
+      parsed.totals.total = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
+      parsed.totalsSources.push(label);
     }
   }
 

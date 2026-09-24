@@ -231,15 +231,16 @@ export async function extractDocument(
     }
     const baseForTotal = keptSubtotal?.value ?? (canRecompute ? pageAmounts.reduce((a, b) => a + b, 0) : null);
     if (total && baseForTotal !== null) {
-      const expectedTotal = baseForTotal + (keptGst?.value ?? baseForTotal * GST_RATE);
-      // Only judge the total when GST itself survived (else cascade).
-      if (keptGst !== null || gst === null) {
-        if (Math.abs(total.value - expectedTotal) > MONEY_TOLERANCE) {
-          refusals.push(
-            arithmeticMismatch("total", "total", total.raw, money(expectedTotal), parsed.page, total.evidence.sourceText),
-          );
-          keptTotal = null;
-        }
+      // No GST line printed (e.g. a GST-inclusive "Total:" with no breakdown):
+      // the total must equal the lines. With a GST line, it must equal
+      // base + GST, using recomputed GST when the printed GST failed.
+      const gstShare = gst ? (keptGst?.value ?? baseForTotal * GST_RATE) : 0;
+      const expectedTotal = baseForTotal + gstShare;
+      if (Math.abs(total.value - expectedTotal) > MONEY_TOLERANCE) {
+        refusals.push(
+          arithmeticMismatch("total", "total", total.raw, money(expectedTotal), parsed.page, total.evidence.sourceText),
+        );
+        keptTotal = null;
       }
     }
 
