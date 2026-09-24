@@ -1,304 +1,160 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
-import { EnvelopeSchema, type Envelope, type Refusal } from "@/lib/schema";
+import { EnvelopeSchema, type Envelope } from "@/lib/schema";
+import { ResultView } from "./result-view";
 
-type Status = "idle" | "uploading" | "done" | "transport-error";
+type Status = "idle" | "loading" | "done" | "transport-error";
 
-function money(n: number): string {
-  return `$${n.toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+const samples = [
+  { name: "Clean invoice", detail: "All values traced", file: "IB-55871.pdf" },
+  { name: "Scanned page", detail: "Nothing guessed", file: "IB-55902.pdf" },
+  { name: "Conflicting counts", detail: "Disagreement shown", file: "IB-56088.pdf" },
+] as const;
 
 export default function Home() {
   const [status, setStatus] = useState<Status>("idle");
   const [envelope, setEnvelope] = useState<Envelope | null>(null);
-  const [transportMessage, setTransportMessage] = useState<string>("");
+  const [transportMessage, setTransportMessage] = useState("");
+  const [fileLabel, setFileLabel] = useState("");
   const [dragging, setDragging] = useState(false);
-  const [fileLabel, setFileLabel] = useState<string>("");
   const inputRef = useRef<HTMLInputElement>(null);
 
   const upload = useCallback(async (file: File) => {
-    setStatus("uploading");
+    setStatus("loading");
     setEnvelope(null);
     setTransportMessage("");
     setFileLabel(file.name);
+
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch("/api/extract", { method: "POST", body: form });
-      const json: unknown = await res.json();
-      const parsed = EnvelopeSchema.safeParse(json);
-      if (!parsed.success) {
-        setStatus("transport-error");
+      const response = await fetch("/api/extract", { method: "POST", body: form });
+      if (!response.headers.get("content-type")?.includes("application/json")) {
         setTransportMessage(
-          "The server answered in a format this page doesn't recognise. " +
-            "Nothing is shown rather than risk displaying a wrong number. " +
-            `Technical detail: ${parsed.error.issues[0]?.message ?? "schema mismatch"}.`,
+          response.status === 413
+            ? "The server rejected this upload because it is too large for the deployed service. Choose a smaller PDF."
+            : `The server returned HTTP ${response.status}${response.statusText ? ` (${response.statusText})` : ""} without extraction details. Please try again or check the deployment.`,
         );
+        setStatus("transport-error");
+        return;
+      }
+
+      const body: unknown = await response.json();
+      const parsed = EnvelopeSchema.safeParse(body);
+      if (!parsed.success) {
+        setTransportMessage(
+          `The server returned HTTP ${response.status}, but its response did not match the extraction contract: ${parsed.error.issues[0]?.message ?? "unknown schema difference"}. Nothing from this response is shown.`,
+        );
+        setStatus("transport-error");
+        return;
+      }
+      if (!response.ok && parsed.data.ok) {
+        setTransportMessage(`The server returned HTTP ${response.status} alongside a success result, so this page cannot tell whether the extraction completed safely.`);
+        setStatus("transport-error");
         return;
       }
       setEnvelope(parsed.data);
       setStatus("done");
-    } catch (err) {
-      // Transport failure: say exactly what happened, not "an error occurred".
-      setStatus("transport-error");
+    } catch (error) {
       setTransportMessage(
-        err instanceof Error
-          ? `Upload failed before the file could be read: ${err.message}. Check your connection and try again.`
-          : "Upload failed before the file could be read for an unknown reason. Please try again.",
+        error instanceof Error
+          ? `The upload could not reach or read the server response: ${error.message}. Check your connection and try again.`
+          : "The upload stopped before the server returned a response. Check your connection and try again.",
       );
+      setStatus("transport-error");
     }
   }, []);
 
-  const onFiles = useCallback(
-    (files: FileList | null) => {
-      if (files && files[0]) void upload(files[0]);
-    },
-    [upload],
-  );
+  const onFiles = useCallback((files: FileList | null) => {
+    if (status === "loading" || !files?.[0]) return;
+    void upload(files[0]);
+  }, [status, upload]);
+
+  const loadSample = useCallback(async (fileName: string) => {
+    if (status === "loading") return;
+    setStatus("loading");
+    setEnvelope(null);
+    setTransportMessage("");
+    setFileLabel(fileName);
+    try {
+      const response = await fetch(`/samples/${fileName}`);
+      if (!response.ok) throw new Error(`sample file returned HTTP ${response.status}`);
+      const file = new File([await response.blob()], fileName, { type: "application/pdf" });
+      await upload(file);
+    } catch (error) {
+      setTransportMessage(`The example could not be loaded: ${error instanceof Error ? error.message : "no response"}. You can still upload your own PDF.`);
+      setStatus("transport-error");
+    }
+  }, [status, upload]);
 
   return (
-    <main>
-      <h1>Insta Quote AI — document reader</h1>
-      <p className="muted">
-        Upload a PDF invoice, packing list or delivery docket. Every number
-        shown names the page and exact text it came from. Anything the reader
-        can&apos;t stand behind appears below as a plain-English refusal —
-        never a guess, never &ldquo;an error occurred&rdquo;.
-      </p>
+    <div className="site-shell">
+      <header className="site-header">
+        <div className="brand"><span className="brand-mark">IQ</span><span>Insta Quote <strong>AI</strong></span></div>
+        <span className="header-label">Document reader · Assessment</span>
+      </header>
 
-      <div
-        className={`dropzone${dragging ? " dragging" : ""}`}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragging(false);
-          onFiles(e.dataTransfer.files);
-        }}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept="application/pdf,.pdf"
-          disabled={status === "uploading"}
-          onChange={(e) => onFiles(e.target.files)}
-          aria-label="Choose a PDF file"
-        />
-        <p className="muted">…or drag a PDF onto this box.</p>
-      </div>
-
-      {status === "uploading" && (
-        <div className="card" role="status" aria-live="polite">
-          Reading <strong>{fileLabel}</strong> — extracting text page by page…
-        </div>
-      )}
-
-      {status === "transport-error" && (
-        <div className="error-panel" role="alert">
-          <strong>Couldn&apos;t read that file.</strong>
-          <p>{transportMessage}</p>
-        </div>
-      )}
-
-      {status === "done" && envelope && <Result envelope={envelope} />}
-    </main>
-  );
-}
-
-function Result({ envelope }: { envelope: Envelope }) {
-  if (!envelope.ok) {
-    return (
-      <>
-        <div className="error-panel" role="alert">
-          <strong>Couldn&apos;t extract this file.</strong>
-          <p>{envelope.error.plainMessage}</p>
-          <p className="muted">Technical code: {envelope.error.code}</p>
-        </div>
-        <Refusals
-          refusals={envelope.refusals}
-          title="What we can tell you"
-        />
-      </>
-    );
-  }
-
-  const { document, lineItems, totals, refusals, pageResults } = envelope;
-  return (
-    <>
-      <div className="card">
-        <h2>
-          {envelope.fileName}
-          {refusals.length === 0 ? (
-            <span className="ok-pill">fully read</span>
-          ) : (
-            <span className="warn-pill">
-              partly read · {refusals.length} refusal
-              {refusals.length === 1 ? "" : "s"}
-            </span>
-          )}
-        </h2>
-        <p className="muted">
-          {[document.docNo, document.date, document.billTo, document.jobRef]
-            .filter(Boolean)
-            .join(" · ") || "No document header found."}
-        </p>
-        <p className="muted">
-          {pageResults.map((p) => (
-            <span key={p.page}>
-              Page {p.page}: {p.status === "ok" ? `${p.itemCount} items` : "refused"}
-              {" · "}
-            </span>
-          ))}
-        </p>
-      </div>
-
-      {lineItems.length > 0 && (
-        <div className="card">
-          <h2>Line items ({lineItems.length})</h2>
-          <table>
-            <thead>
-              <tr>
-                <th>Code</th>
-                <th>Description</th>
-                <th>Qty</th>
-                <th>Unit</th>
-                <th>Unit price</th>
-                <th>Amount</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lineItems.map((item, idx) => (
-                <tr key={`${item.code}-${idx}`}>
-                  <td>
-                    <code>{item.code}</code>
-                    <Evidence
-                      page={item.codeEvidence.page}
-                      sourceText={item.codeEvidence.sourceText}
-                    />
-                  </td>
-                  <td>{item.description}</td>
-                  <td>
-                    {item.quantity.value.toLocaleString()}
-                    <Evidence
-                      page={item.quantity.evidence.page}
-                      sourceText={item.quantity.evidence.sourceText}
-                    />
-                  </td>
-                  <td>
-                    {item.unit}
-                    <Evidence
-                      page={item.unitEvidence.page}
-                      sourceText={item.unitEvidence.sourceText}
-                    />
-                  </td>
-                  <td>
-                    {money(item.unitPrice.value)}
-                    <Evidence
-                      page={item.unitPrice.evidence.page}
-                      sourceText={item.unitPrice.evidence.sourceText}
-                    />
-                  </td>
-                  <td>
-                    {item.amount ? (
-                      <>
-                        {money(item.amount.value)}
-                        <Evidence
-                          page={item.amount.evidence.page}
-                          sourceText={item.amount.evidence.sourceText}
-                        />
-                      </>
-                    ) : (
-                      <span className="muted">not shown — see refusals</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {totals && (
-        <div className="card">
-          <h2>Totals</h2>
-          <table>
-            <tbody>
-              <TotalRow label="Subtotal" value={totals.subtotal} />
-              <TotalRow label="GST" value={totals.gst} />
-              <TotalRow label="Total" value={totals.total} />
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <Refusals refusals={refusals} title="Refusals — read these, not skipped" />
-    </>
-  );
-}
-
-function TotalRow({
-  label,
-  value,
-}: {
-  label: string;
-  value: { value: number; raw: string; evidence: { page: number; sourceText: string } } | null;
-}) {
-  return (
-    <tr>
-      <td>
-        <strong>{label}</strong>
-      </td>
-      <td>
-        {value ? (
-          <>
-            {money(value.value)}
-            <Evidence page={value.evidence.page} sourceText={value.evidence.sourceText} />
-          </>
-        ) : (
-          <span className="muted">refused — see below</span>
-        )}
-      </td>
-    </tr>
-  );
-}
-
-function Evidence({ page, sourceText }: { page: number; sourceText: string }) {
-  return (
-    <details className="evidence">
-      <summary>page {page} · source</summary>
-      <pre>{sourceText}</pre>
-    </details>
-  );
-}
-
-function Refusals({
-  refusals,
-  title,
-}: {
-  refusals: Refusal[];
-  title: string;
-}) {
-  const list = refusals;
-  if (list.length === 0) return null;
-  return (
-    <div>
-      <h2>{title}</h2>
-      {list.map((r, idx) => (
-        <div className="refusal" key={idx} role="note">
-          <div className="code">
-            {r.reasonCode}
-            {r.page !== null ? ` · page ${r.page}` : ""}
+      <main>
+        <section className="hero" aria-labelledby="page-title">
+          <div className="hero-copy">
+            <span className="eyebrow hero-eyebrow"><span className="eyebrow-dot" /> Evidence-led extraction</span>
+            <h1 id="page-title">Know what the document says.<br /><em>Know what it doesn&apos;t.</em></h1>
+            <p>Upload an invoice, packing list or delivery docket. See the line items we can trace to the PDF, plus clear notes for anything we cannot read safely.</p>
+            <div className="hero-points"><span>Page-level sources</span><span>Clear refusals</span><span>No guessed quantities</span></div>
           </div>
-          <p>{r.plainMessage}</p>
-          {r.sources.map((source, index) => (
-            <Evidence key={index} page={source.page} sourceText={source.sourceText} />
-          ))}
-        </div>
-      ))}
+          <div className="upload-panel">
+            <div className="upload-panel-heading"><span className="eyebrow">Start here</span><h2>Read a PDF</h2><p>Your file is checked page by page.</p></div>
+            <div
+              className={`dropzone${dragging ? " dragging" : ""}${status === "loading" ? " busy" : ""}`}
+              onDragOver={(event) => { event.preventDefault(); if (status !== "loading") setDragging(true); }}
+              onDragLeave={() => setDragging(false)}
+              onDrop={(event) => { event.preventDefault(); setDragging(false); onFiles(event.dataTransfer.files); }}
+              aria-busy={status === "loading"}
+            >
+              <div className="upload-icon" aria-hidden="true">↑</div>
+              <strong>Drop your PDF here</strong>
+              <span>or choose a file from your device</span>
+              <input
+                ref={inputRef}
+                className="visually-hidden"
+                type="file"
+                accept="application/pdf,.pdf"
+                disabled={status === "loading"}
+                aria-label="Choose a PDF file"
+                onChange={(event) => { onFiles(event.target.files); event.target.value = ""; }}
+              />
+              <button type="button" className="primary-button" disabled={status === "loading"} onClick={() => inputRef.current?.click()}>Choose PDF</button>
+              <small>PDF files only</small>
+            </div>
+            <div className="samples-heading"><span>Try an example</span><span>Provided assessment files</span></div>
+            <div className="sample-grid">
+              {samples.map((sample) => (
+                <button className="sample-button" type="button" key={sample.file} disabled={status === "loading"} onClick={() => void loadSample(sample.file)}>
+                  <strong>{sample.name}</strong><span>{sample.detail}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {status === "loading" && (
+          <div className="loading-panel" role="status" aria-live="polite">
+            <span className="spinner" aria-hidden="true" />
+            <div><strong>Reading {fileLabel}</strong><p>Checking each page and its source text. This can take a moment.</p></div>
+          </div>
+        )}
+        {status === "transport-error" && (
+          <div className="failure-panel transport-failure" role="alert">
+            <span className="eyebrow">Upload stopped</span>
+            <h2>We couldn&apos;t show a result</h2>
+            <p>{transportMessage}</p>
+          </div>
+        )}
+        {status === "done" && envelope && <ResultView envelope={envelope} />}
+      </main>
+
+      <footer className="site-footer"><span>Insta Quote AI · Take-home assessment</span><span>Every shown value has a source. Uncertain values stay out.</span></footer>
     </div>
   );
 }
