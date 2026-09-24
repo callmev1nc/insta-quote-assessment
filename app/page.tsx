@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import { EnvelopeSchema, type Envelope } from "@/lib/schema";
+import { MAX_PDF_BYTES, MAX_PDF_LABEL } from "@/lib/limits";
 import { ResultView } from "./result-view";
 
 type Status = "idle" | "loading" | "done" | "transport-error";
@@ -25,6 +26,12 @@ export default function Home() {
     setEnvelope(null);
     setTransportMessage("");
     setFileLabel(file.name);
+
+    if (file.size > MAX_PDF_BYTES) {
+      setTransportMessage(`That file is too big for this demo (limit ${MAX_PDF_LABEL}). Please choose a smaller PDF.`);
+      setStatus("transport-error");
+      return;
+    }
 
     try {
       const form = new FormData();
@@ -125,7 +132,7 @@ export default function Home() {
                 onChange={(event) => { onFiles(event.target.files); event.target.value = ""; }}
               />
               <button type="button" className="primary-button" disabled={status === "loading"} onClick={() => inputRef.current?.click()}>Choose PDF</button>
-              <small>PDF files only</small>
+              <small>PDF files up to {MAX_PDF_LABEL}</small>
             </div>
             <div className="samples-heading"><span>Try an example</span><span>Provided assessment files</span></div>
             <div className="sample-grid">

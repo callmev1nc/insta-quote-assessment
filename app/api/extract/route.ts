@@ -1,11 +1,9 @@
 import { NextResponse } from "next/server";
-import { extractDocument } from "@/lib/extract";
-import { EnvelopeSchema, type Envelope, type RefusalReason } from "@/lib/schema";
+import { extractDocument } from "../../../lib/extract";
+import { MAX_PDF_BYTES, MAX_PDF_LABEL } from "../../../lib/limits";
+import { EnvelopeSchema, type Envelope, type RefusalReason } from "../../../lib/schema";
 
 export const runtime = "nodejs";
-
-/** Upload cap: sample dockets are KBs; 10MB is generous without inviting abuse. */
-const MAX_BYTES = 10 * 1024 * 1024;
 
 function fail(
   fileName: string | null,
@@ -56,12 +54,12 @@ export async function POST(request: Request): Promise<NextResponse> {
       400,
     );
   }
-  if (file.size > MAX_BYTES) {
+  if (file.size > MAX_PDF_BYTES) {
     return fail(
       file.name,
       "FILE_TOO_LARGE",
-      `Upload is ${file.size} bytes; limit is ${MAX_BYTES}.`,
-      `That file is too big (limit 10MB). Please try a smaller PDF.`,
+      `Upload is ${file.size} bytes; limit is ${MAX_PDF_BYTES}.`,
+      `That file is too big (limit ${MAX_PDF_LABEL}). Please try a smaller PDF.`,
       413,
     );
   }
