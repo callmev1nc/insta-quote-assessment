@@ -60,7 +60,7 @@ function kindsOnPage(text: string): string[] {
 }
 
 function money(n: number): string {
-  return `$${n.toFixed(2)}`;
+  return `$${n.toLocaleString("en-NZ", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 export async function extractDocument(
