@@ -19,9 +19,12 @@ import type { LineItem, Totals, TracedNumber } from "./schema";
  */
 
 const CODE_RE = /^[A-Z]{2}-\d{3,4}$/;
-const QTY_RE = /^[\d,]+$/;
-const MONEY_RE = /^\$([\d,]+\.\d{2})$/;
-const UNIT_PRICE_RE = /^\$([\d,]+\.\d{2})(?:\s*\/\s*([A-Za-z]+))?\s*$/;
+// Reject malformed grouping such as "12,3" or ",," instead of silently
+// turning it into a plausible value with parseInt/parseFloat.
+const INTEGER = "(?:0|[1-9]\\d*|[1-9]\\d{0,2}(?:,\\d{3})+)";
+const QTY_RE = new RegExp(`^${INTEGER}$`);
+const MONEY_RE = new RegExp(`^\\$(${INTEGER}\\.\\d{2})$`);
+const UNIT_PRICE_RE = new RegExp(`^\\$(${INTEGER}\\.\\d{2})(?:\\s*\\/\\s*([A-Za-z]+))?\\s*$`);
 
 const FOOTER_MARKERS = [
   "subtotal:",
@@ -46,6 +49,11 @@ function isFooterToken(token: string): boolean {
 
 function parseMoney(raw: string): number {
   return Number.parseFloat(raw.replace(/[$,]/g, ""));
+}
+
+function validMoney(raw: string): boolean {
+  const value = parseMoney(raw);
+  return Number.isFinite(value) && Number.isSafeInteger(Math.round(value * 100));
 }
 
 /** Classify a totals label ("Subtotal:", "GST (15%):", "Total:", …). */
@@ -73,17 +81,23 @@ function traced(
 
 export interface ParsedPage {
   page: number;
+  tableFound: boolean;
+  tableProblems: Array<{ reason: string; sourceText: string }>;
   /** "Unit" | "Weight" | null when no table header was found. */
   qtyHeader: string | null;
   hasAmountColumn: boolean;
   docNo: string | null;
   docNoSource: string | null;
   date: string | null;
+  dateSource: string | null;
   billTo: string | null;
+  billToSource: string | null;
   jobRef: string | null;
+  jobRefSource: string | null;
   lineItems: LineItem[];
   totals: Totals;
-  totalsSources: string[];
+  totalConflicts: Array<{ kind: keyof Totals; first: TracedNumber; second: TracedNumber }>;
+  totalProblems: Array<{ reason: string; sourceText: string }>;
   cartonCounts: Array<{ count: number; sourceText: string }>;
   notes: string[];
 }
@@ -98,55 +112,84 @@ function looksLikeDescription(token: string): boolean {
   );
 }
 
-/** Split raw page text into non-blank tokens (one cell each). */
-export function tokenize(text: string): string[] {
-  return text
-    .split("\n")
-    .map((t) => t.trim())
-    .filter((t) => t.length > 0);
+interface Token {
+  text: string;
+  /** Exact substring of the PDF text stream for this cell. */
+  sourceText: string;
+  start: number;
+  end: number;
+}
+
+/** Split PDF text into cells without discarding their original positions. */
+function tokenize(text: string): Token[] {
+  const tokens: Token[] = [];
+  let offset = 0;
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed) {
+      tokens.push({ text: trimmed, sourceText: line, start: offset, end: offset + line.length });
+    }
+    offset += line.length + 1;
+  }
+  return tokens;
 }
 
 export function parsePage(page: number, text: string): ParsedPage {
   const tokens = tokenize(text);
   const parsed: ParsedPage = {
     page,
+    tableFound: false,
+    tableProblems: [],
     qtyHeader: null,
     hasAmountColumn: false,
     docNo: null,
     docNoSource: null,
     date: null,
+    dateSource: null,
     billTo: null,
+    billToSource: null,
     jobRef: null,
+    jobRefSource: null,
     lineItems: [],
     totals: { subtotal: null, gst: null, total: null },
-    totalsSources: [],
+    totalConflicts: [],
+    totalProblems: [],
     cartonCounts: [],
     notes: [],
   };
 
   // Document meta + carton statements + notes can appear anywhere on the page.
   for (const token of tokens) {
-    let m = token.match(/^Document No:\s*(.+)$/i);
+    let m = token.text.match(/^Document No:\s*(.+)$/i);
     if (m && !parsed.docNo) {
       parsed.docNo = m[1].trim();
-      parsed.docNoSource = token;
+      parsed.docNoSource = token.sourceText;
     }
-    m = token.match(/^Date:\s*(.+)$/i);
-    if (m && !parsed.date) parsed.date = m[1].trim();
-    m = token.match(/^Bill to:\s*(.+)$/i);
-    if (m && !parsed.billTo) parsed.billTo = m[1].trim();
-    m = token.match(/^Job ref:\s*(.+)$/i);
-    if (m && !parsed.jobRef) parsed.jobRef = m[1].trim();
+    m = token.text.match(/^Date:\s*(.+)$/i);
+    if (m && !parsed.date) {
+      parsed.date = m[1].trim();
+      parsed.dateSource = token.sourceText;
+    }
+    m = token.text.match(/^Bill to:\s*(.+)$/i);
+    if (m && !parsed.billTo) {
+      parsed.billTo = m[1].trim();
+      parsed.billToSource = token.sourceText;
+    }
+    m = token.text.match(/^Job ref:\s*(.+)$/i);
+    if (m && !parsed.jobRef) {
+      parsed.jobRef = m[1].trim();
+      parsed.jobRefSource = token.sourceText;
+    }
 
-    const carton = token.match(/(\d+)\s+cartons?\b/i);
-    if (carton && /dispatched|picked|loaded/i.test(token)) {
+    const carton = token.text.match(/(\d+)\s+cartons?\b/i);
+    if (carton && /dispatched|picked|loaded/i.test(token.text)) {
       parsed.cartonCounts.push({
         count: Number.parseInt(carton[1], 10),
-        sourceText: token,
+        sourceText: token.sourceText,
       });
     }
-    if (/^note:/i.test(token) || /^total consignment/i.test(token)) {
-      parsed.notes.push(token);
+    if (/^note:/i.test(token.text) || /^total consignment/i.test(token.text)) {
+      parsed.notes.push(token.sourceText);
     }
   }
 
@@ -154,82 +197,88 @@ export function parsePage(page: number, text: string): ParsedPage {
   let rowStart = -1;
   for (let i = 0; i + 4 < tokens.length; i += 1) {
     if (
-      tokens[i] === "Code" &&
-      tokens[i + 1] === "Description" &&
-      tokens[i + 2] === "Qty" &&
-      (tokens[i + 3] === "Unit" || tokens[i + 3] === "Weight") &&
-      tokens[i + 4] === "Unit Price"
+      tokens[i].text === "Code" &&
+      tokens[i + 1].text === "Description" &&
+      tokens[i + 2].text === "Qty" &&
+      (tokens[i + 3].text === "Unit" || tokens[i + 3].text === "Weight") &&
+      tokens[i + 4].text === "Unit Price"
     ) {
-      parsed.qtyHeader = tokens[i + 3];
-      parsed.hasAmountColumn = tokens[i + 5] === "Amount";
+      parsed.qtyHeader = tokens[i + 3].text;
+      parsed.hasAmountColumn = tokens[i + 5]?.text === "Amount";
       rowStart = i + (parsed.hasAmountColumn ? 6 : 5);
+      parsed.tableFound = true;
       break;
     }
   }
   if (rowStart === -1) return parsed;
 
-  // Rows.
+  // A malformed row is refused as a block; the next clear code boundary lets
+  // later valid rows survive without interpreting missing cells by position.
   let i = rowStart;
   while (i < tokens.length) {
     const token = tokens[i];
-    // Decorative rule lines (e.g. under the header) are neither rows nor footers.
-    if (/^-{3,}$/.test(token)) {
+    if (/^-{3,}$/.test(token.text)) {
       i += 1;
       continue;
     }
-    if (isFooterToken(token)) break;
-    if (!CODE_RE.test(token)) {
-      i += 1;
+    if (isFooterToken(token.text)) break;
+
+    if (!CODE_RE.test(token.text)) {
+      const start = i;
+      while (i < tokens.length && !CODE_RE.test(tokens[i].text) && !isFooterToken(tokens[i].text)) i += 1;
+      parsed.tableProblems.push({
+        reason: "Unexpected text in the line-item table",
+        sourceText: text.slice(tokens[start].start, tokens[i - 1].end),
+      });
       continue;
     }
-    const block = [token];
-    const code = token;
-    const description = tokens[i + 1];
-    const qtyRaw = tokens[i + 2];
-    const unitRaw = tokens[i + 3];
-    const unitPriceRaw = tokens[i + 4];
-    const amountRaw = parsed.hasAmountColumn ? tokens[i + 5] : undefined;
 
-    const okShape =
-      description !== undefined &&
-      looksLikeDescription(description) &&
-      qtyRaw !== undefined &&
-      QTY_RE.test(qtyRaw) &&
-      unitRaw !== undefined &&
-      !isFooterToken(unitRaw) &&
-      unitPriceRaw !== undefined &&
-      UNIT_PRICE_RE.test(unitPriceRaw) &&
-      (!parsed.hasAmountColumn ||
-        (amountRaw !== undefined && MONEY_RE.test(amountRaw)));
-
-    if (!okShape) break; // strict: stop, never skip-and-guess
-
-    block.push(description, qtyRaw, unitRaw, unitPriceRaw);
     const width = parsed.hasAmountColumn ? 6 : 5;
-    if (parsed.hasAmountColumn && amountRaw) block.push(amountRaw);
-    const sourceText = block.join("\n");
+    const cells = tokens.slice(i, i + width);
+    const [code, description, qty, unit, unitPrice, amount] = cells;
+    const unitPriceMatch = unitPrice?.text.match(UNIT_PRICE_RE);
+    const quantityValue = qty ? parseQty(qty.text) : NaN;
+    const valid =
+      cells.length === width &&
+      description !== undefined && looksLikeDescription(description.text) &&
+      qty !== undefined && QTY_RE.test(qty.text) && Number.isSafeInteger(quantityValue) &&
+      unit !== undefined && !isFooterToken(unit.text) && !CODE_RE.test(unit.text) &&
+      !QTY_RE.test(unit.text) && !MONEY_RE.test(unit.text) &&
+      unitPrice !== undefined && unitPriceMatch !== null && unitPriceMatch !== undefined &&
+      validMoney(unitPriceMatch[1]) &&
+      (!parsed.hasAmountColumn || (amount !== undefined && MONEY_RE.test(amount.text) && validMoney(amount.text)));
 
-    const unitPriceMatch = unitPriceRaw.match(UNIT_PRICE_RE);
-    if (!unitPriceMatch) break;
+    if (!valid) {
+      const start = i;
+      i += 1;
+      while (i < tokens.length && !CODE_RE.test(tokens[i].text) && !isFooterToken(tokens[i].text)) i += 1;
+      parsed.tableProblems.push({
+        reason: `Could not safely read row ${code.text}`,
+        sourceText: text.slice(tokens[start].start, tokens[i - 1].end),
+      });
+      continue;
+    }
+
+    // The validity check above establishes these cells and match exist.
+    const descriptionCell = description!;
+    const qtyCell = qty!;
+    const unitCell = unit!;
+    const priceCell = unitPrice!;
+    const priceMatch = unitPriceMatch!;
+    const blockText = text.slice(code.start, cells[width - 1].end);
     parsed.lineItems.push({
-      code,
-      codeEvidence: { page, sourceText: code },
-      description,
-      descriptionEvidence: { page, sourceText: description },
-      quantity: traced(qtyRaw, parseQty(qtyRaw), page, qtyRaw),
-      unit: unitRaw,
-      unitEvidence: { page, sourceText: unitRaw },
-      unitPrice: traced(
-        unitPriceRaw,
-        parseMoney(unitPriceMatch[1]),
-        page,
-        unitPriceRaw,
-      ),
-      amount:
-        parsed.hasAmountColumn && amountRaw
-          ? traced(amountRaw, parseMoney(amountRaw), page, amountRaw)
-          : null,
-      blockEvidence: { page, sourceText },
+      code: code.text,
+      codeEvidence: { page, sourceText: code.sourceText },
+      description: descriptionCell.text,
+      descriptionEvidence: { page, sourceText: descriptionCell.sourceText },
+      quantity: traced(qtyCell.text, quantityValue, page, qtyCell.sourceText),
+      unit: unitCell.text,
+      unitEvidence: { page, sourceText: unitCell.sourceText },
+      unitPrice: traced(priceCell.text, parseMoney(priceMatch[1]), page, priceCell.sourceText),
+      amount: parsed.hasAmountColumn && amount
+        ? traced(amount.text, parseMoney(amount.text), page, amount.sourceText)
+        : null,
+      blockEvidence: { page, sourceText: blockText },
     });
     i += width;
   }
@@ -241,31 +290,36 @@ export function parsePage(page: number, text: string): ParsedPage {
     const next = tokens[k + 1];
     let label: string | null = null;
     let moneyRaw: string | null = null;
-    const combined = token.match(/^(.*?)\s+(\$[\d,]+\.\d{2})$/);
+    const combined = token.text.match(/^(.*?)\s+(\$[\d,]+\.\d{2})$/);
     if (combined && totalsKind(combined[1])) {
       label = combined[1];
       moneyRaw = combined[2];
     } else if (
       next !== undefined &&
-      MONEY_RE.test(next) &&
-      totalsKind(token)
+      MONEY_RE.test(next.text) &&
+      totalsKind(token.text)
     ) {
-      label = token;
-      moneyRaw = next;
+      label = token.text;
+      moneyRaw = next.text;
     }
-    if (!label || !moneyRaw) continue;
+    if ((!label || !moneyRaw) && totalsKind(token.text) && next?.text.startsWith("$")) {
+      parsed.totalProblems.push({ reason: `Could not read ${token.text} value`, sourceText: text.slice(token.start, next.end) });
+    }
+    if (label && moneyRaw && (!MONEY_RE.test(moneyRaw) || !validMoney(moneyRaw))) {
+      parsed.totalProblems.push({ reason: `Malformed ${label} value`, sourceText: token.sourceText });
+    }
+    if (!label || !moneyRaw || !MONEY_RE.test(moneyRaw) || !validMoney(moneyRaw)) continue;
     const kind = totalsKind(label);
-    const sourceText =
-      moneyRaw === next ? label + "\n" + moneyRaw : token;
-    if (kind === "subtotal" && !parsed.totals.subtotal) {
-      parsed.totals.subtotal = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
-      parsed.totalsSources.push(label);
-    } else if (kind === "gst" && !parsed.totals.gst) {
-      parsed.totals.gst = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
-      parsed.totalsSources.push(label);
-    } else if (kind === "total" && !parsed.totals.total) {
-      parsed.totals.total = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
-      parsed.totalsSources.push(label);
+    if (!kind) continue;
+    const sourceText = moneyRaw === next?.text
+      ? text.slice(token.start, next.end)
+      : token.sourceText;
+    const candidate = traced(moneyRaw, parseMoney(moneyRaw), page, sourceText);
+    const first = parsed.totals[kind];
+    if (!first) {
+      parsed.totals[kind] = candidate;
+    } else if (first.value !== candidate.value) {
+      parsed.totalConflicts.push({ kind, first, second: candidate });
     }
   }
 

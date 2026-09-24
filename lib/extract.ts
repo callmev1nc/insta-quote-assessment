@@ -1,17 +1,25 @@
-import { extractPageTexts, MIN_READABLE_CHARS } from "./pdf";
+import { extractPageTexts, MIN_READABLE_CHARS, type PageText } from "./pdf";
 import { parsePage, type ParsedPage } from "./parse";
 import {
   ambiguousUnit,
   arithmeticMismatch,
   conflictingSources,
   conversionRefused,
+  dependentTotalRefused,
   missingTotal,
   mixedDocumentTypes,
+  multiPageTotalsRefused,
+  pageReadFailed,
   scannedPage,
+  totalsWithheld,
+  unparsedRow,
+  unparsedTotal,
   unreadablePage,
+  unsupportedLayout,
 } from "./refusals";
 import type {
   DocumentMeta,
+  Evidence,
   Envelope,
   LineItem,
   PageResult,
@@ -40,13 +48,10 @@ const KNOWN_UNITS = new Set([
 ]);
 
 const MONEY_TOLERANCE = 0.01;
-const GST_RATE = 0.15;
 
 /** Section titles that mark a statement bundling several document types. */
 const SECTION_KINDS: Array<{ kind: string; re: RegExp }> = [
   { kind: "invoice", re: /invoice \d+ of \d+/i },
-  { kind: "materials", re: /\bmaterials\b/i },
-  { kind: "fixings", re: /\bfixings\b/i },
   { kind: "summary", re: /statement summary/i },
   { kind: "freight", re: /freight charges/i },
   { kind: "credit", re: /credit note/i },
@@ -81,28 +86,41 @@ export async function extractDocument(
         "We couldn't open this file as a PDF at all — it may be corrupted or password-protected. " +
         "Nothing was extracted.",
       page: null,
-      sourceText: null,
+      sources: [],
     };
     return { ok: false, fileName, error: { code: "PDF_UNREADABLE", message, plainMessage: refusal.plainMessage }, refusals: [refusal] };
   }
 
+  return extractFromPages(pages, fileName);
+}
+
+/** Pure orchestration boundary so page containment can be tested without a PDF fixture. */
+export function extractFromPages(pages: PageText[], fileName: string): Envelope {
   const refusals: Refusal[] = [];
   const lineItems: LineItem[] = [];
   const parsedPages: ParsedPage[] = [];
   const pageTexts: string[] = [];
   const pageResults: PageResult[] = [];
 
-  let meta: DocumentMeta = {
+  const meta: DocumentMeta = {
     docNo: null,
     docNoEvidence: null,
     date: null,
+    dateEvidence: null,
     billTo: null,
+    billToEvidence: null,
     jobRef: null,
+    jobRefEvidence: null,
   };
-  const docNos = new Map<string, number>();
+  const docNos = new Map<string, Evidence>();
 
-  for (const { page, text, charCount, hasImage } of pages) {
+  for (const { page, text, charCount, hasImage, readError } of pages) {
     pageTexts.push(text);
+    if (readError) {
+      refusals.push(pageReadFailed(page, readError));
+      pageResults.push({ page, status: "refused", itemCount: 0 });
+      continue;
+    }
     if (charCount < MIN_READABLE_CHARS) {
       refusals.push(hasImage ? scannedPage(page) : unreadablePage(page, charCount));
       pageResults.push({ page, status: "refused", itemCount: 0 });
@@ -112,36 +130,53 @@ export async function extractDocument(
     try {
       parsed = parsePage(page, text);
     } catch (err) {
-      refusals.push(
-        unreadablePage(
-          page,
-          charCount,
-        ),
-      );
-      void err;
+      refusals.push(pageReadFailed(page, err instanceof Error ? err.message : "The page parser failed."));
+      pageResults.push({ page, status: "refused", itemCount: 0 });
+      continue;
+    }
+
+    if (!parsed.tableFound) {
+      refusals.push(unsupportedLayout(page, text.slice(0, 180)));
+      pageResults.push({ page, status: "refused", itemCount: 0 });
+      continue;
+    }
+    if (parsed.lineItems.length === 0 && parsed.tableProblems.length === 0) {
+      refusals.push(unsupportedLayout(page, text.slice(0, 180)));
       pageResults.push({ page, status: "refused", itemCount: 0 });
       continue;
     }
 
     parsedPages.push(parsed);
+    for (const problem of parsed.tableProblems) {
+      refusals.push(unparsedRow(page, problem.reason, problem.sourceText));
+    }
+    for (const problem of parsed.totalProblems) {
+      refusals.push(unparsedTotal(page, problem.reason, problem.sourceText));
+    }
 
     if (parsed.docNo && !meta.docNo) {
-      meta = {
-        docNo: parsed.docNo,
-        docNoEvidence: parsed.docNoSource
-          ? { page, sourceText: parsed.docNoSource }
-          : null,
-        date: parsed.date,
-        billTo: parsed.billTo,
-        jobRef: parsed.jobRef,
-      };
+      meta.docNo = parsed.docNo;
+      meta.docNoEvidence = parsed.docNoSource ? { page, sourceText: parsed.docNoSource } : null;
     }
-    if (parsed.docNo) docNos.set(parsed.docNo, page);
+    if (parsed.date && !meta.date) {
+      meta.date = parsed.date;
+      meta.dateEvidence = parsed.dateSource ? { page, sourceText: parsed.dateSource } : null;
+    }
+    if (parsed.billTo && !meta.billTo) {
+      meta.billTo = parsed.billTo;
+      meta.billToEvidence = parsed.billToSource ? { page, sourceText: parsed.billToSource } : null;
+    }
+    if (parsed.jobRef && !meta.jobRef) {
+      meta.jobRef = parsed.jobRef;
+      meta.jobRefEvidence = parsed.jobRefSource ? { page, sourceText: parsed.jobRefSource } : null;
+    }
+    if (parsed.docNo && parsed.docNoSource) docNos.set(parsed.docNo, { page, sourceText: parsed.docNoSource });
 
     // Line-amount gate: printed amount must equal qty x unit price.
     for (const item of parsed.lineItems) {
-      if (!item.amount) {
-        lineItems.push(item);
+      const trustedUnit = parsed.qtyHeader !== "Weight" && KNOWN_UNITS.has(item.unit.trim().toLowerCase());
+      if (!item.amount || !trustedUnit) {
+        lineItems.push(trustedUnit ? item : { ...item, amount: null });
         continue;
       }
       const expected = item.quantity.value * item.unitPrice.value;
@@ -162,33 +197,68 @@ export async function extractDocument(
       }
     }
 
-    pageResults.push({ page, status: "ok", itemCount: parsed.lineItems.length });
+    pageResults.push({
+      page,
+      status: parsed.lineItems.length === 0 ? "refused" : parsed.tableProblems.length || parsed.totalProblems.length ? "partial" : "ok",
+      itemCount: parsed.lineItems.length,
+    });
   }
 
   if (docNos.size > 1) {
-    const [first, second] = [...docNos.keys()];
+    const [first, second] = [...docNos.values()];
     refusals.push(
       conflictingSources("document number", first, second, null),
     );
+    meta.docNo = null;
+    meta.docNoEvidence = null;
+  }
+
+  const metadataChecks = [
+    {
+      what: "date",
+      entries: parsedPages.map((p) => ({ value: p.date, source: p.dateSource, page: p.page })),
+      clear: () => { meta.date = null; meta.dateEvidence = null; },
+    },
+    {
+      what: "bill-to name",
+      entries: parsedPages.map((p) => ({ value: p.billTo, source: p.billToSource, page: p.page })),
+      clear: () => { meta.billTo = null; meta.billToEvidence = null; },
+    },
+    {
+      what: "job reference",
+      entries: parsedPages.map((p) => ({ value: p.jobRef, source: p.jobRefSource, page: p.page })),
+      clear: () => { meta.jobRef = null; meta.jobRefEvidence = null; },
+    },
+  ];
+  for (const check of metadataChecks) {
+    const first = check.entries.find((entry) => entry.value && entry.source);
+    const second = check.entries.find((entry) => first && entry.value && entry.source && entry.value !== first.value);
+    if (first?.source && second?.source) {
+      refusals.push(conflictingSources(
+        check.what,
+        { page: first.page, sourceText: first.source },
+        { page: second.page, sourceText: second.source },
+        null,
+      ));
+      check.clear();
+    }
   }
 
   // ---- Unit gates ---------------------------------------------------------
-  const rawUnits = parsedPages.flatMap((p) =>
-    p.lineItems.map((i) => i.unit),
-  );
-  const hasWeightColumn = parsedPages.some((p) => p.qtyHeader === "Weight");
-  const unknownUnits = rawUnits.filter(
-    (u) => !KNOWN_UNITS.has(u.trim().toLowerCase()),
-  );
-  const readablePages = parsedPages.map((p) => p.page);
-  const unitScopePage = readablePages[0] ?? null;
-  if ((hasWeightColumn || unknownUnits.length > 0) && unitScopePage !== null) {
-    refusals.push(ambiguousUnit(unitScopePage, unknownUnits.length > 0 ? unknownUnits : ["Weight"]));
-    refusals.push(conversionRefused(unitScopePage));
+  const ambiguousPages = new Set<number>();
+  for (const parsed of parsedPages) {
+    const unknownUnits = parsed.lineItems
+      .map((item) => item.unit)
+      .filter((unit) => !KNOWN_UNITS.has(unit.trim().toLowerCase()));
+    if (parsed.qtyHeader === "Weight" || unknownUnits.length > 0) {
+      ambiguousPages.add(parsed.page);
+      refusals.push(ambiguousUnit(parsed.page, unknownUnits.length ? unknownUnits : ["Weight"]));
+      refusals.push(conversionRefused(parsed.page));
+    }
   }
 
   // ---- Totals gates ---------------------------------------------------------
-  const multiPage = parsedPages.length > 1;
+  const multiPage = pages.length > 1;
   const kinds = new Set(pageTexts.flatMap(kindsOnPage));
   const isMixedBundle =
     multiPage && kinds.size > 1 && kinds.has("invoice");
@@ -196,55 +266,82 @@ export async function extractDocument(
   let totals: Totals | null = null;
   if (isMixedBundle) {
     // Never sum invoices + freight + credit + delivery into one number.
-    refusals.push(mixedDocumentTypes(parsedPages.length));
+    refusals.push(mixedDocumentTypes(pages.length));
     totals = null;
-  } else if (parsedPages.length === 1) {
+  } else if (pages.length === 1 && parsedPages.length === 1) {
     const parsed = parsedPages[0];
     const { subtotal, gst, total } = parsed.totals;
-    const pageAmounts = parsed.lineItems
+    const validatedLines = lineItems.filter((item) => item.blockEvidence.page === parsed.page);
+    const pageAmounts = validatedLines
       .map((i) => i.amount?.value ?? null)
       .filter((v): v is number => v !== null);
     const canRecompute = pageAmounts.length === parsed.lineItems.length && pageAmounts.length > 0;
+    const incompleteTable = parsed.tableProblems.length > 0 || ambiguousPages.has(parsed.page) ||
+      (parsed.lineItems.length > 0 && !canRecompute);
 
     let keptSubtotal = subtotal;
     let keptGst = gst;
     let keptTotal = total;
 
-    if (subtotal && canRecompute) {
+    for (const conflict of parsed.totalConflicts) {
+      refusals.push(conflictingSources(
+        `the ${conflict.kind}`,
+        conflict.first.evidence,
+        conflict.second.evidence,
+        parsed.page,
+      ));
+      if (conflict.kind === "subtotal") keptSubtotal = null;
+      if (conflict.kind === "gst") keptGst = null;
+      if (conflict.kind === "total") keptTotal = null;
+    }
+
+    if (incompleteTable && (subtotal || gst || total)) {
+      refusals.push(totalsWithheld(parsed.page));
+      keptSubtotal = null;
+      keptGst = null;
+      keptTotal = null;
+    }
+
+    if (keptSubtotal && canRecompute && !incompleteTable) {
       const expected = pageAmounts.reduce((a, b) => a + b, 0);
-      if (Math.abs(subtotal.value - expected) > MONEY_TOLERANCE) {
+      if (Math.abs(keptSubtotal.value - expected) > MONEY_TOLERANCE) {
         refusals.push(
-          arithmeticMismatch("total", "subtotal", subtotal.raw, money(expected), parsed.page, subtotal.evidence.sourceText),
+          arithmeticMismatch("total", "subtotal", keptSubtotal.raw, money(expected), parsed.page, keptSubtotal.evidence.sourceText),
         );
         keptSubtotal = null;
       }
     }
-    const baseForGst = keptSubtotal?.value ?? (canRecompute ? pageAmounts.reduce((a, b) => a + b, 0) : null);
-    if (gst && baseForGst !== null) {
-      const expectedGst = baseForGst * GST_RATE;
-      if (Math.abs(gst.value - expectedGst) > 0.02) {
+    const baseForGst = canRecompute ? pageAmounts.reduce((a, b) => a + b, 0) : null;
+    const printedRate = keptGst?.evidence.sourceText.match(/\((\d+(?:\.\d+)?)%\)/)?.[1];
+    if (keptGst && baseForGst !== null && printedRate !== undefined && !incompleteTable) {
+      const expectedGst = baseForGst * (Number(printedRate) / 100);
+      if (Math.abs(keptGst.value - expectedGst) > 0.02) {
         refusals.push(
-          arithmeticMismatch("total", "GST", gst.raw, money(expectedGst), parsed.page, gst.evidence.sourceText),
+          arithmeticMismatch("total", "GST", keptGst.raw, money(expectedGst), parsed.page, keptGst.evidence.sourceText),
         );
         keptGst = null;
       }
     }
-    const baseForTotal = keptSubtotal?.value ?? (canRecompute ? pageAmounts.reduce((a, b) => a + b, 0) : null);
-    if (total && baseForTotal !== null) {
+    const baseForTotal = canRecompute ? pageAmounts.reduce((a, b) => a + b, 0) : null;
+    if (keptTotal && gst && !keptGst && !incompleteTable) {
+      refusals.push(dependentTotalRefused(parsed.page, keptTotal.evidence.sourceText));
+      keptTotal = null;
+    }
+    if (keptTotal && baseForTotal !== null && !incompleteTable) {
       // No GST line printed (e.g. a GST-inclusive "Total:" with no breakdown):
       // the total must equal the lines. With a GST line, it must equal
-      // base + GST, using recomputed GST when the printed GST failed.
-      const gstShare = gst ? (keptGst?.value ?? baseForTotal * GST_RATE) : 0;
+      // base + the printed GST if that GST survived its validation.
+      const gstShare = keptGst?.value ?? 0;
       const expectedTotal = baseForTotal + gstShare;
-      if (Math.abs(total.value - expectedTotal) > MONEY_TOLERANCE) {
+      if (Math.abs(keptTotal.value - expectedTotal) > MONEY_TOLERANCE) {
         refusals.push(
-          arithmeticMismatch("total", "total", total.raw, money(expectedTotal), parsed.page, total.evidence.sourceText),
+          arithmeticMismatch("total", "total", keptTotal.raw, money(expectedTotal), parsed.page, keptTotal.evidence.sourceText),
         );
         keptTotal = null;
       }
     }
 
-    if (!subtotal && !gst && !total) {
+    if (!subtotal && !gst && !total && parsed.totalConflicts.length === 0) {
       refusals.push(
         missingTotal(
           parsed.lineItems.length > 0
@@ -256,9 +353,8 @@ export async function extractDocument(
     } else {
       totals = { subtotal: keptSubtotal, gst: keptGst, total: keptTotal };
     }
-  } else if (parsedPages.length > 1) {
-    // Multi-page, single-type (not present in samples): refuse aggregation.
-    refusals.push(mixedDocumentTypes(parsedPages.length));
+  } else if (pages.length > 1 && parsedPages.length > 0) {
+    refusals.push(multiPageTotalsRefused());
     totals = null;
   } else {
     totals = null;
@@ -270,15 +366,22 @@ export async function extractDocument(
   );
   const distinct = [...new Set(cartonCounts.map((c) => c.count))];
   if (distinct.length > 1) {
-    const sources = cartonCounts.map((c) => c.sourceText);
+    const first = cartonCounts[0];
+    const second = cartonCounts.find((count) => count.count !== first.count)!;
     refusals.push(
       conflictingSources(
         "the carton count",
-        sources[0],
-        sources[1],
-        cartonCounts[0].page,
+        { page: first.page, sourceText: first.sourceText },
+        { page: second.page, sourceText: second.sourceText },
+        first.page,
       ),
     );
+  }
+
+  for (const result of pageResults) {
+    if (result.status === "ok" && refusals.some((refusal) => refusal.page === result.page)) {
+      result.status = "partial";
+    }
   }
 
   return {

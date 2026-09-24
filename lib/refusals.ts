@@ -1,4 +1,4 @@
-import type { Refusal, RefusalReason } from "./schema";
+import type { Evidence, Refusal, RefusalReason } from "./schema";
 
 /**
  * Refusal taxonomy. Every refusal carries two messages:
@@ -15,9 +15,67 @@ function make(
   message: string,
   plainMessage: string,
   page: number | null = null,
-  sourceText: string | null = null,
+  sources: Evidence[] = [],
 ): Refusal {
-  return { scope, reasonCode, message, plainMessage, page, sourceText };
+  return { scope, reasonCode, message, plainMessage, page, sources };
+}
+
+export function pageReadFailed(page: number, detail: string): Refusal {
+  return make(
+    "page", "PAGE_READ_FAILED",
+    `Page ${page} failed inside the PDF reader: ${detail}`,
+    `We couldn't read page ${page} because the PDF reader reported a problem. Other pages were still checked.`,
+    page,
+  );
+}
+
+export function unsupportedLayout(page: number, sourceText: string): Refusal {
+  return make(
+    "page", "UNSUPPORTED_LAYOUT",
+    `Page ${page} contains readable text but no supported line-item table.`,
+    `Page ${page} has readable text, but its table layout isn't one this reader can verify. We left its values out rather than guess which numbers belong together.`,
+    page,
+    sourceText ? [{ page, sourceText }] : [],
+  );
+}
+
+export function unparsedRow(page: number, reason: string, sourceText: string): Refusal {
+  return make(
+    "line", "UNPARSED_ROW",
+    `Page ${page}: ${reason}.`,
+    `We couldn't safely read one part of the table on page ${page}, so those values were left out. Other clear rows from the page are still shown.`,
+    page,
+    sourceText ? [{ page, sourceText }] : [],
+  );
+}
+
+export function totalsWithheld(page: number): Refusal {
+  return make(
+    "total", "UNVERIFIED_TOTAL",
+    `Page ${page} has unparsed table content; printed totals cannot be checked against all rows.`,
+    `We left out the totals on page ${page} because at least one table row could not be read. A total checked against only the visible rows could be misleading.`,
+    page,
+  );
+}
+
+export function unparsedTotal(page: number, reason: string, sourceText: string): Refusal {
+  return make(
+    "total", "UNVERIFIED_TOTAL",
+    `Page ${page}: ${reason}.`,
+    `We couldn't safely read one of the totals on page ${page}, so that figure is left out.`,
+    page,
+    sourceText ? [{ page, sourceText }] : [],
+  );
+}
+
+export function dependentTotalRefused(page: number, sourceText: string): Refusal {
+  return make(
+    "total", "UNVERIFIED_TOTAL",
+    `Page ${page}: total depends on a GST value that was refused.`,
+    `We left out the total on page ${page} because its GST figure could not be verified.`,
+    page,
+    [{ page, sourceText }],
+  );
 }
 
 export function scannedPage(page: number): Refusal {
@@ -47,12 +105,11 @@ export function ambiguousUnit(page: number, rawUnits: string[]): Refusal {
   return make(
     "field",
     "AMBIGUOUS_UNIT",
-    `Page ${page} uses a Weight column with unconverted units (${shown}); no unit normalisation applied.`,
-    `Page ${page} lists weights (like "${shown}") instead of plain quantities, and the file itself says ` +
-      `they're unconverted. We listed the lines as printed but didn't convert between grams and kilos — ` +
-      `that maths is left for you to confirm.`,
+    `Page ${page} has unit or weight cells (${shown}) that cannot be used safely for amount validation.`,
+    `Page ${page} uses units or weights such as "${shown}" that we can't safely match to the prices. ` +
+      `We kept the printed quantities and prices, but left out amounts that would need that assumption.`,
     page,
-    rawUnits[0] ?? null,
+    rawUnits[0] ? [{ page, sourceText: rawUnits[0] }] : [],
   );
 }
 
@@ -75,32 +132,33 @@ export function arithmeticMismatch(
   page: number | null,
   sourceText: string | null,
 ): Refusal {
+  const plainMessage = scope === "line"
+    ? `The ${what} printed on the document (${printed}) doesn't match quantity times unit price (${recomputed}). We kept the printed quantity and price, but left out that amount.`
+    : `The ${what} printed on the document (${printed}) doesn't match the figure calculated from the readable lines (${recomputed}), so we left that total out.`;
   return make(
     scope,
     "ARITHMETIC_MISMATCH",
     `${what} mismatch: printed ${printed} but recomputed ${recomputed}.`,
-    `The ${what} printed on the document (${printed}) doesn't match what the line items add up to ` +
-      `(${recomputed}), so we're not showing it. The individual lines above are still fine — ` +
-      `it's the ${what} that can't be trusted.`,
+    plainMessage,
     page,
-    sourceText,
+    page !== null && sourceText ? [{ page, sourceText }] : [],
   );
 }
 
 export function conflictingSources(
   what: string,
-  first: string,
-  second: string,
+  first: Evidence,
+  second: Evidence,
   page: number | null,
 ): Refusal {
   return make(
     "field",
     "CONFLICTING_SOURCES",
-    `${what} conflict: "${first}" vs "${second}" in the same file.`,
-    `The document says two different things about ${what}: "${first}" in one place and "${second}" ` +
+    `${what} conflict: "${first.sourceText}" vs "${second.sourceText}" in the same file.`,
+    `The document says two different things about ${what}: "${first.sourceText}" in one place and "${second.sourceText}" ` +
       `in another. Rather than pick one, we're showing neither — please check the original.`,
     page,
-    `${first} / ${second}`,
+    [first, second],
   );
 }
 
@@ -108,10 +166,16 @@ export function mixedDocumentTypes(pages: number): Refusal {
   return make(
     "total",
     "MIXED_DOCUMENT_TYPES",
-    `Document bundles multiple types (invoices, summary, freight, credit, delivery) across ${pages} pages; no grand total emitted.`,
-    `This file bundles several different kinds of paperwork (invoices, freight charges, a credit note ` +
-      `reference and a delivery confirmation). Adding them into one grand total would mix money in with ` +
-      `money out, so we haven't done that. Each page's lines are listed separately above.`,
+    `Document bundles multiple document types across ${pages} pages; no grand total emitted.`,
+    `This file combines different kinds of paperwork across ${pages} pages. Adding every line into one total could mix charges with credits or confirmations, so we left out a combined total. The readable lines remain listed by page.`,
+  );
+}
+
+export function multiPageTotalsRefused(): Refusal {
+  return make(
+    "total", "MULTI_PAGE_TOTAL_REFUSED",
+    "Multiple readable pages have line items but no verified document-level total.",
+    "This file has line items on several pages. We haven't added them into one total because the document doesn't provide a combined figure we can verify.",
   );
 }
 

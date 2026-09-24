@@ -25,7 +25,7 @@ function fail(
         message,
         plainMessage,
         page: null,
-        sourceText: null,
+        sources: [],
       },
     ],
   };
@@ -90,7 +90,7 @@ export async function POST(request: Request): Promise<NextResponse> {
       500,
     );
   }
-  return NextResponse.json(checked.data, { status: 200 });
+  return NextResponse.json(checked.data, { status: checked.data.ok ? 200 : 422 });
 }
 
 export async function GET(): Promise<NextResponse> {

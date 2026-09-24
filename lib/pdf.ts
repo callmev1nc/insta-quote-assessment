@@ -16,6 +16,8 @@ export interface PageText {
   charCount: number;
   /** True when the page paints at least one image XObject. */
   hasImage: boolean;
+  /** Page-specific PDF failure; other pages can still be processed. */
+  readError: string | null;
 }
 
 interface PdfJsPage {
@@ -47,36 +49,45 @@ export async function extractPageTexts(
   const pages: PageText[] = [];
   try {
     for (let n = 1; n <= doc.numPages; n += 1) {
-      const page = (await doc.getPage(n)) as unknown as PdfJsPage;
+      let page: PdfJsPage;
+      try {
+        page = (await doc.getPage(n)) as unknown as PdfJsPage;
+      } catch (error) {
+        pages.push({ page: n, text: "", charCount: 0, hasImage: false, readError: error instanceof Error ? error.message : "Could not open page." });
+        continue;
+      }
       let text = "";
       let hasImage = false;
+      let readError: string | null = null;
       try {
         const content = await page.getTextContent();
         text = content.items
           .map((item) => (typeof item.str === "string" ? item.str : ""))
           .join("\n");
-      } catch {
-        text = "";
+      } catch (error) {
+        readError = error instanceof Error ? error.message : "Could not read page text.";
       }
-      try {
-        const ops = await page.getOperatorList();
-        const OPS = (
-          pdfjs as unknown as {
-            OPS: Record<string, number>;
-          }
-        ).OPS;
-        hasImage =
-          ops.fnArray.includes(OPS.paintImageXObject) ||
-          ops.fnArray.includes(OPS.paintInlineImageXObject) ||
-          ops.fnArray.includes(OPS.paintImageXObjectRepeat);
-      } catch {
-        hasImage = false;
+      const charCount = text.replace(/\s/g, "").length;
+      // Image operators are expensive on long PDFs and only needed to explain
+      // why a page with too little text cannot be read.
+      if (!readError && charCount < MIN_READABLE_CHARS) {
+        try {
+          const ops = await page.getOperatorList();
+          const OPS = (pdfjs as unknown as { OPS: Record<string, number> }).OPS;
+          hasImage =
+            ops.fnArray.includes(OPS.paintImageXObject) ||
+            ops.fnArray.includes(OPS.paintInlineImageXObject) ||
+            ops.fnArray.includes(OPS.paintImageXObjectRepeat);
+        } catch (error) {
+          readError = error instanceof Error ? error.message : "Could not inspect page images.";
+        }
       }
       pages.push({
         page: n,
         text,
-        charCount: text.replace(/\s/g, "").length,
+        charCount,
         hasImage,
+        readError,
       });
     }
   } finally {

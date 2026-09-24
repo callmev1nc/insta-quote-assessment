@@ -22,10 +22,12 @@ export type Evidence = z.infer<typeof EvidenceSchema>;
 
 /** A number that can point at where it came from. */
 export const TracedNumberSchema = z.object({
-  value: z.number(),
+  value: z.number().finite(),
   /** Raw characters as printed, e.g. "$1,248.00" or "2,000". */
   raw: z.string().min(1),
   evidence: EvidenceSchema,
+}).refine((number) => number.evidence.sourceText.includes(number.raw), {
+  message: "A numeric value must include its raw text in its evidence.",
 });
 export type TracedNumber = z.infer<typeof TracedNumberSchema>;
 
@@ -73,6 +75,11 @@ export const RefusalReasonSchema = z.enum([
   "PDF_UNREADABLE", // file could not be opened as a PDF at all
   "NOT_A_PDF", // upload failed magic-byte validation
   "FILE_TOO_LARGE", // over the configured upload limit
+  "UNSUPPORTED_LAYOUT", // readable page, but no supported table was found
+  "UNPARSED_ROW", // a table row could not be read safely
+  "PAGE_READ_FAILED", // one PDF page failed while other pages may survive
+  "MULTI_PAGE_TOTAL_REFUSED", // no safe aggregate across several pages
+  "UNVERIFIED_TOTAL", // printed total is malformed or depends on refused values
 ]);
 export type RefusalReason = z.infer<typeof RefusalReasonSchema>;
 
@@ -85,8 +92,8 @@ export const RefusalSchema = z.object({
   /** Plain-language reason, shown verbatim in the UI. No jargon. */
   plainMessage: z.string().min(1),
   page: z.number().int().min(1).nullable(),
-  /** Verbatim source involved in the refusal, when there is one. */
-  sourceText: z.string().nullable(),
+  /** Verbatim, page-specific sources involved in the refusal. */
+  sources: z.array(EvidenceSchema),
 });
 export type Refusal = z.infer<typeof RefusalSchema>;
 
@@ -96,7 +103,7 @@ export type Refusal = z.infer<typeof RefusalSchema>;
 
 export const PageResultSchema = z.object({
   page: z.number().int().min(1),
-  status: z.enum(["ok", "refused"]),
+  status: z.enum(["ok", "partial", "refused"]),
   itemCount: z.number().int().min(0),
 });
 export type PageResult = z.infer<typeof PageResultSchema>;
@@ -105,8 +112,11 @@ export const DocumentMetaSchema = z.object({
   docNo: z.string().nullable(),
   docNoEvidence: EvidenceSchema.nullable(),
   date: z.string().nullable(),
+  dateEvidence: EvidenceSchema.nullable(),
   billTo: z.string().nullable(),
+  billToEvidence: EvidenceSchema.nullable(),
   jobRef: z.string().nullable(),
+  jobRefEvidence: EvidenceSchema.nullable(),
 });
 export type DocumentMeta = z.infer<typeof DocumentMetaSchema>;
 

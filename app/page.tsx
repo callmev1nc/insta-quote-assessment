@@ -294,12 +294,9 @@ function Refusals({
             {r.page !== null ? ` · page ${r.page}` : ""}
           </div>
           <p>{r.plainMessage}</p>
-          {r.sourceText && (
-            <details className="evidence">
-              <summary>source text involved</summary>
-              <pre>{r.sourceText}</pre>
-            </details>
-          )}
+          {r.sources.map((source, index) => (
+            <Evidence key={index} page={source.page} sourceText={source.sourceText} />
+          ))}
         </div>
       ))}
     </div>
