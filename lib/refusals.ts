@@ -82,9 +82,9 @@ export function scannedPage(page: number): Refusal {
   return make(
     "page",
     "SCANNED_NO_TEXT",
-    `Page ${page} contains only an image (scan/photo) with no extractable text.`,
-    `Page ${page} looks like a photo or scan, so we couldn't read any text from it. ` +
-      `Nothing from that page is included below — it needs re-scanning as a readable PDF or manual entry.`,
+    `Page ${page} paints an image but contains zero extractable PDF text characters.`,
+    `You may be able to read page ${page} on screen, but it is a picture with no selectable text. ` +
+      `This reader cannot extract its words or numbers, so nothing from that page is included. Please enter it manually or upload a searchable PDF.`,
     page,
   );
 }

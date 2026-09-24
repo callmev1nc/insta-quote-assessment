@@ -29,6 +29,18 @@ function table(rows: string[], footer: string[] = []): string {
 const goodRow = ["AA-100", "Valid first line", "2", "ea", "$3.00", "$6.00"];
 
 describe("fail-closed extraction", () => {
+  it("distinguishes an image-only page from an image with too little text", () => {
+    const imageOnly = extractFromPages([{ ...page(""), hasImage: true }], "scan.pdf");
+    const sparseText = extractFromPages([{ ...page("Page 1"), hasImage: true }], "sparse.pdf");
+    expect(imageOnly.ok).toBe(true);
+    expect(sparseText.ok).toBe(true);
+    if (!imageOnly.ok || !sparseText.ok) return;
+    expect(imageOnly.refusals[0].reasonCode).toBe("SCANNED_NO_TEXT");
+    expect(sparseText.refusals[0].reasonCode).toBe("UNREADABLE_PAGE");
+    expect(imageOnly.lineItems).toHaveLength(0);
+    expect(sparseText.lineItems).toHaveLength(0);
+  });
+
   it("keeps clear rows around a malformed row and withholds incomplete totals", () => {
     const text = table([
       ...goodRow,

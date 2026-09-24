@@ -15,9 +15,10 @@ async function renderFixture(name: string): Promise<string> {
 describe("refusals reaching the page", () => {
   it("shows the scan refusal in plain language before the empty line-item table", async () => {
     const html = await renderFixture("IB-55902.pdf");
-    expect(html).toContain("looks like a photo or scan");
+    expect(html).toContain("You may be able to read page 1 on screen");
+    expect(html).toContain("no selectable text");
     expect(html).toContain("No line items could be read safely");
-    expect(html.indexOf("looks like a photo or scan")).toBeLessThan(html.indexOf("Line items"));
+    expect(html.indexOf("You may be able to read page 1 on screen")).toBeLessThan(html.indexOf("Line items"));
   });
 
   it("shows both conflicting carton statements with their exact source text", async () => {

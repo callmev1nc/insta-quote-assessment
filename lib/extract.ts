@@ -122,7 +122,7 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       continue;
     }
     if (charCount < MIN_READABLE_CHARS) {
-      refusals.push(hasImage ? scannedPage(page) : unreadablePage(page, charCount));
+      refusals.push(hasImage && charCount === 0 ? scannedPage(page) : unreadablePage(page, charCount));
       pageResults.push({ page, status: "refused", itemCount: 0 });
       continue;
     }

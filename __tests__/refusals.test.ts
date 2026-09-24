@@ -43,6 +43,8 @@ describe("refusal rules (real sample PDFs)", () => {
 
   it("one unreadable page is contained; the other seven survive", async () => {
     const env = await extract("IB-STMT47.pdf");
+    const pages = await extractPageTexts(await readFile(join(fixtures, "IB-STMT47.pdf")));
+    expect(pages[3]).toMatchObject({ page: 4, charCount: 0, hasImage: true });
     expect(env.lineItems).toHaveLength(21);
     const byPage = new Map(env.pageResults.map((p) => [p.page, p]));
     expect(byPage.get(4)).toMatchObject({ status: "refused", itemCount: 0 });
