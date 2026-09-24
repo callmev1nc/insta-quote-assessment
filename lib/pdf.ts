@@ -1,10 +1,10 @@
 /**
  * Page-level PDF text extraction (server-side only).
  *
- * Returns one entry per page with the raw text plus the signals the refusal
- * rules need: character count and whether the page paints an image. A page
- * with no text but a painted image is a scan/photo — callers must refuse it
- * (SCANNED_NO_TEXT), never guess at it.
+ * pdfjs reads the PDF text layer; it does not recognize letters inside an
+ * image. A viewer can therefore display a readable-looking page while this
+ * function returns no text. Each result gives the caller the extracted text
+ * and enough signals to explain a refusal without inventing image contents.
  */
 
 export interface PageText {
@@ -14,7 +14,7 @@ export interface PageText {
   text: string;
   /** Non-whitespace character count — drives the unreadable-page check. */
   charCount: number;
-  /** True when the page paints at least one image XObject. */
+  /** Image present on a low-text page; image inspection is skipped otherwise. */
   hasImage: boolean;
   /** Page-specific PDF failure; other pages can still be processed. */
   readError: string | null;
@@ -25,9 +25,10 @@ interface PdfJsPage {
   getOperatorList(): Promise<{ fnArray: number[] }>;
 }
 
-/** Minimum non-whitespace chars before a page counts as readable. */
+/** A low-text screening threshold, not a confidence score or proof of a valid table. */
 export const MIN_READABLE_CHARS = 20;
 
+/** Open once, then contain text-reading failures to the affected page. */
 export async function extractPageTexts(
   buffer: Buffer,
 ): Promise<PageText[]> {
@@ -49,6 +50,8 @@ export async function extractPageTexts(
   const pages: PageText[] = [];
   try {
     for (let n = 1; n <= doc.numPages; n += 1) {
+      // Opening the file can fail as a whole; opening a later page should not
+      // discard text already recovered from earlier pages.
       let page: PdfJsPage;
       try {
         page = (await doc.getPage(n)) as unknown as PdfJsPage;
@@ -61,6 +64,8 @@ export async function extractPageTexts(
       let readError: string | null = null;
       try {
         const content = await page.getTextContent();
+        // Preserve item order and characters here. parsePage later keeps
+        // substrings from this stream as evidence for individual values.
         text = content.items
           .map((item) => (typeof item.str === "string" ? item.str : ""))
           .join("\n");
@@ -68,8 +73,9 @@ export async function extractPageTexts(
         readError = error instanceof Error ? error.message : "Could not read page text.";
       }
       const charCount = text.replace(/\s/g, "").length;
-      // Image operators are expensive on long PDFs and only needed to explain
-      // why a page with too little text cannot be read.
+      // Inspect images only when text is too short to parse. An image with
+      // zero text explains SCANNED_NO_TEXT; a few text characters still get
+      // UNREADABLE_PAGE because we cannot claim the page has no text layer.
       if (!readError && charCount < MIN_READABLE_CHARS) {
         try {
           const ops = await page.getOperatorList();

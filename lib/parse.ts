@@ -4,11 +4,12 @@ import type { LineItem, Totals, TracedNumber } from "./schema";
  * Deterministic parser for the Ironbark table layout.
  *
  * Strict by design: a row is only emitted when every cell matches the
- * grammar below AND the exact source tokens are retained as evidence. Anything
- * that does not fit is left unparsed — the caller turns leftovers into
- * refusals rather than guesses.
+ * grammar below AND its source tokens are retained as evidence. This parser
+ * returns candidates and problems; extractFromPages performs validation and
+ * turns the problems into refusals before the API returns anything.
  *
- * Grammar (one token per cell, tokens = non-blank pdfjs text items):
+ * Grammar (one token per cell; tokens are non-blank lines from the joined
+ * pdfjs text-item stream):
  *   code        ^[A-Z]{2}-\d{3,4}$          e.g. "FX-201", "CX-1000"
  *   description any non-empty token that is not a code/number/money/marker
  *   qty         ^[\d,]+$                    e.g. "24", "2,000"
@@ -79,6 +80,7 @@ function traced(
   return { value, raw, evidence: { page, sourceText } };
 }
 
+/** Intermediate candidates only: a parsed amount or total may still be refused. */
 export interface ParsedPage {
   page: number;
   tableFound: boolean;
@@ -120,7 +122,11 @@ interface Token {
   end: number;
 }
 
-/** Split PDF text into cells without discarding their original positions. */
+/**
+ * Match against trimmed cells, but retain offsets into the untrimmed text.
+ * Those offsets let row evidence be an actual slice of the PDF text stream
+ * instead of a sentence reconstructed from normalized cells.
+ */
 function tokenize(text: string): Token[] {
   const tokens: Token[] = [];
   let offset = 0;
@@ -193,6 +199,8 @@ export function parsePage(page: number, text: string): ParsedPage {
     }
   }
 
+  // Only enter row parsing after this exact known header. A different layout
+  // remains unsupported even if it contains plausible quantities and money.
   // Header: Code Description Qty (Unit|Weight) Unit Price [Amount]
   let rowStart = -1;
   for (let i = 0; i + 4 < tokens.length; i += 1) {
@@ -212,8 +220,9 @@ export function parsePage(page: number, text: string): ParsedPage {
   }
   if (rowStart === -1) return parsed;
 
-  // A malformed row is refused as a block; the next clear code boundary lets
-  // later valid rows survive without interpreting missing cells by position.
+  // A malformed row is refused as a block. The next clear code boundary lets
+  // later valid rows survive; shifting cells to fill a gap could attach a
+  // quantity or price to the wrong product.
   let i = rowStart;
   while (i < tokens.length) {
     const token = tokens[i];
@@ -259,7 +268,9 @@ export function parsePage(page: number, text: string): ParsedPage {
       continue;
     }
 
-    // The validity check above establishes these cells and match exist.
+    // The validity check above establishes these cells and match exist. The
+    // amount stays null if the document did not print an Amount column; the
+    // parser does not manufacture one from quantity times unit price.
     const descriptionCell = description!;
     const qtyCell = qty!;
     const unitCell = unit!;
@@ -284,7 +295,9 @@ export function parsePage(page: number, text: string): ParsedPage {
   }
 
   // Totals live in the footer region. Labels and values may arrive as two
-  // tokens ("Total:" + "$2,050.00") or one ("Total: $2,050.00").
+  // tokens ("Total:" + "$2,050.00") or one ("Total: $2,050.00"). Keep each
+  // printed candidate and report conflicting copies; the orchestrator decides
+  // whether any total can be checked against all retained line amounts.
   for (let k = i; k < tokens.length; k += 1) {
     const token = tokens[k];
     const next = tokens[k + 1];

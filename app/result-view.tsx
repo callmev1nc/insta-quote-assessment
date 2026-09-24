@@ -3,6 +3,8 @@ import type { Envelope, Evidence as SourceEvidence, LineItem, Refusal, TracedNum
 
 export function ResultView({ envelope }: { envelope: Envelope }) {
   if (!envelope.ok) {
+    // File-level refusal: no line items are safe to display, but the server's
+    // plain-language reason still reaches the person using the page.
     return (
       <section className="result-stack" aria-label="Extraction result">
         <div className="failure-panel" role="alert">
@@ -56,6 +58,8 @@ export function ResultView({ envelope }: { envelope: Envelope }) {
         )}
       </div>
 
+      {/* Put review notes before the values: a partial result must never look
+          complete to someone who only scans the top of the result. */}
       <RefusalList refusals={refusals} />
 
       <div className="panel items-panel">

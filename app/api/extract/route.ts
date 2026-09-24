@@ -65,6 +65,8 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const bytes = Buffer.from(await file.arrayBuffer());
+  // The signature check catches mislabeled uploads quickly. pdfjs still has
+  // to open the file; a PDF header alone does not prove it is readable.
   if (bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
     return fail(
       file.name,
@@ -76,8 +78,9 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   const envelope = await extractDocument(bytes, file.name);
-  // Validate our own output before it leaves the building: if we ever emit a
-  // number without evidence (a bug), fail loudly here instead of shipping it.
+  // Validate our own output before it leaves the route. The schema requires
+  // each numeric raw value to appear inside its evidence text; fixture tests
+  // additionally check that the evidence text came from the cited PDF page.
   const checked = EnvelopeSchema.safeParse(envelope);
   if (!checked.success) {
     return fail(

@@ -28,13 +28,11 @@ import type {
 } from "./schema";
 
 /**
- * Orchestrator: per-page containment + cross-page validation rules.
- *
- * Two guarantees:
- * 1. A failure on one page never takes down the rest (per-page try/catch).
- * 2. A number only survives into the output if it is traced to a page and
- *    source text AND survives every validation gate. Otherwise it becomes a
- *    refusal that names both the printed and the recomputed figure.
+ * Orchestrator between PDF reading, strict page parsing, and the API contract.
+ * A page can fail without hiding sourced lines from other pages. Parsed values
+ * are candidates: ambiguous units, conflicting statements, or arithmetic
+ * mismatches become explicit refusals instead of plausible-looking answers.
+ * No line amount or total is synthesized when the document did not print it.
  */
 
 const KNOWN_UNITS = new Set([
@@ -76,6 +74,8 @@ export async function extractDocument(
   try {
     pages = await extractPageTexts(buffer);
   } catch (err) {
+    // A file-level open failure leaves no trustworthy pages to process. By
+    // contrast, extractPageTexts records individual page failures in PageText.
     const message =
       err instanceof Error ? err.message : "PDF could not be opened.";
     const refusal: Refusal = {
@@ -94,7 +94,7 @@ export async function extractDocument(
   return extractFromPages(pages, fileName);
 }
 
-/** Pure orchestration boundary so page containment can be tested without a PDF fixture. */
+/** Pure validation boundary; tests can inject page results without constructing PDFs. */
 export function extractFromPages(pages: PageText[], fileName: string): Envelope {
   const refusals: Refusal[] = [];
   const lineItems: LineItem[] = [];
@@ -114,6 +114,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
   };
   const docNos = new Map<string, Evidence>();
 
+  // Page-local refusals do not stop the loop. This is why an image-only page
+  // in the eight-page statement leaves the other seven pages available.
   for (const { page, text, charCount, hasImage, readError } of pages) {
     pageTexts.push(text);
     if (readError) {
@@ -122,6 +124,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       continue;
     }
     if (charCount < MIN_READABLE_CHARS) {
+      // An image plus *zero* text supports the scan diagnosis. Sparse text
+      // needs a different refusal: it may be a partial text layer or a logo.
       refusals.push(hasImage && charCount === 0 ? scannedPage(page) : unreadablePage(page, charCount));
       pageResults.push({ page, status: "refused", itemCount: 0 });
       continue;
@@ -146,6 +150,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       continue;
     }
 
+    // The parser returns source spans for both accepted rows and malformed
+    // blocks. Send every problem down the same refusal path as other failures.
     parsedPages.push(parsed);
     for (const problem of parsed.tableProblems) {
       refusals.push(unparsedRow(page, problem.reason, problem.sourceText));
@@ -154,6 +160,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       refusals.push(unparsedTotal(page, problem.reason, problem.sourceText));
     }
 
+    // First observed metadata is provisional. Cross-page checks below remove
+    // it if another readable page prints a contradictory value.
     if (parsed.docNo && !meta.docNo) {
       meta.docNo = parsed.docNo;
       meta.docNoEvidence = parsed.docNoSource ? { page, sourceText: parsed.docNoSource } : null;
@@ -172,7 +180,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
     }
     if (parsed.docNo && parsed.docNoSource) docNos.set(parsed.docNo, { page, sourceText: parsed.docNoSource });
 
-    // Line-amount gate: printed amount must equal qty x unit price.
+    // Printed line amounts survive only when their unit is understood and the
+    // arithmetic agrees. Keep sourced qty/price even when amount is refused.
     for (const item of parsed.lineItems) {
       const trustedUnit = parsed.qtyHeader !== "Weight" && KNOWN_UNITS.has(item.unit.trim().toLowerCase());
       if (!item.amount || !trustedUnit) {
@@ -197,6 +206,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       }
     }
 
+    // "partial" means some rows survived but a local problem was found. Later
+    // cross-page refusals can also downgrade an initially "ok" page.
     pageResults.push({
       page,
       status: parsed.lineItems.length === 0 ? "refused" : parsed.tableProblems.length || parsed.totalProblems.length ? "partial" : "ok",
@@ -244,7 +255,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
     }
   }
 
-  // ---- Unit gates ---------------------------------------------------------
+  // A unit or weight we cannot normalize blocks validation of that page's
+  // amounts and totals. The original printed quantity and price remain visible.
   const ambiguousPages = new Set<number>();
   for (const parsed of parsedPages) {
     const unknownUnits = parsed.lineItems
@@ -257,7 +269,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
     }
   }
 
-  // ---- Totals gates ---------------------------------------------------------
+  // A statement may mix invoices, freight and credits. Even if all rows are
+  // legible, summing them would invent a meaning the document does not give.
   const multiPage = pages.length > 1;
   const kinds = new Set(pageTexts.flatMap(kindsOnPage));
   const isMixedBundle =
@@ -276,9 +289,13 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       .map((i) => i.amount?.value ?? null)
       .filter((v): v is number => v !== null);
     const canRecompute = pageAmounts.length === parsed.lineItems.length && pageAmounts.length > 0;
+    // Totals are checked only when every parsed line has a surviving amount.
+    // Comparing a printed total with a subset would falsely validate it.
     const incompleteTable = parsed.tableProblems.length > 0 || ambiguousPages.has(parsed.page) ||
       (parsed.lineItems.length > 0 && !canRecompute);
 
+    // These are printed, sourced candidates. Validation may remove a field,
+    // but never replaces its raw value with a calculated number.
     let keptSubtotal = subtotal;
     let keptGst = gst;
     let keptTotal = total;
@@ -354,13 +371,16 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
       totals = { subtotal: keptSubtotal, gst: keptGst, total: keptTotal };
     }
   } else if (pages.length > 1 && parsedPages.length > 0) {
+    // A multi-page document needs its own sourced, validated aggregate policy;
+    // this assessment deliberately refuses one rather than summing pages.
     refusals.push(multiPageTotalsRefused());
     totals = null;
   } else {
     totals = null;
   }
 
-  // ---- Carton-count gate ------------------------------------------------------
+  // Contradictory carton statements must retain *both* source lines so a
+  // reviewer can see exactly why neither count was selected.
   const cartonCounts = parsedPages.flatMap((p) =>
     p.cartonCounts.map((c) => ({ ...c, page: p.page })),
   );
@@ -378,6 +398,8 @@ export function extractFromPages(pages: PageText[], fileName: string): Envelope 
     );
   }
 
+  // Refusals discovered after page parsing still affect the page badge shown
+  // in the UI. A readable page with a conflicting field is only partial.
   for (const result of pageResults) {
     if (result.status === "ok" && refusals.some((refusal) => refusal.page === result.page)) {
       result.status = "partial";

@@ -37,6 +37,8 @@ export default function Home() {
       const form = new FormData();
       form.append("file", file);
       const response = await fetch("/api/extract", { method: "POST", body: form });
+      // The platform can reject an upload before our route runs. Such a reply
+      // has no structured refusals, so show its actual HTTP status here.
       if (!response.headers.get("content-type")?.includes("application/json")) {
         setTransportMessage(
           response.status === 413
@@ -48,6 +50,9 @@ export default function Home() {
       }
 
       const body: unknown = await response.json();
+      // A valid API envelope may contain a refusal even with a non-2xx status.
+      // Keep it intact for ResultView instead of replacing it with a generic
+      // network error. An invalid envelope is unsafe to display as a result.
       const parsed = EnvelopeSchema.safeParse(body);
       if (!parsed.success) {
         setTransportMessage(
@@ -87,6 +92,7 @@ export default function Home() {
     try {
       const response = await fetch(`/samples/${fileName}`);
       if (!response.ok) throw new Error(`sample file returned HTTP ${response.status}`);
+      // Examples use the exact same upload/API path as a user-selected PDF.
       const file = new File([await response.blob()], fileName, { type: "application/pdf" });
       await upload(file);
     } catch (error) {

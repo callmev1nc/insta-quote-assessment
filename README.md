@@ -41,6 +41,8 @@ The upload limit is **4 MiB**. This leaves room for multipart framing under [Ver
 | `IB-56150.pdf` | Four lines, subtotal and GST survive; the printed total is refused because it disagrees with the sourced line arithmetic. |
 | `IB-STMT47.pdf` | Twenty-one lines survive across seven readable pages; scanned page 4 and a combined total are refused. |
 
+**Why page 4 is refused:** A PDF viewer renders its image, so a person can read it on screen. In this fixture, `pdfjs` returns zero text items and zero extractable characters for page 4, while its drawing operations include an image. The service has no OCR step, so it cannot produce exact text evidence for numbers visible only in those pixels. It leaves page 4 out and returns its refusal alongside the 21 sourced lines from pages 1-3 and 5-8. Pages with a little extractable text but too little for the table parser receive a different, `UNREADABLE_PAGE` refusal.
+
 ## The three assessment questions
 
 ### What was the hardest decision, and why did I choose that way?
