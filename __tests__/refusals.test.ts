@@ -3,7 +3,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { extractDocument } from "../lib/extract";
-import type { Envelope } from "../lib/schema";
+import { extractPageTexts } from "../lib/pdf";
+import { EnvelopeSchema, type Envelope } from "../lib/schema";
 
 const fixtures = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");
 
@@ -103,6 +104,8 @@ describe("refusal rules (real sample PDFs)", () => {
       "IB-STMT47.pdf",
     ]) {
       const env = await extract(name);
+      expect(EnvelopeSchema.safeParse(env).success).toBe(true);
+      const pages = await extractPageTexts(await readFile(join(fixtures, name)));
       const numbers = [
         ...env.lineItems.flatMap((i) => [
           i.quantity,
@@ -125,6 +128,18 @@ describe("refusal rules (real sample PDFs)", () => {
         expect(n.evidence.page).toBeGreaterThanOrEqual(1);
         expect(n.raw.length).toBeGreaterThan(0);
         expect(n.evidence.sourceText).toContain(n.raw);
+        expect(pages[n.evidence.page - 1].text).toContain(n.evidence.sourceText);
+      }
+      for (const field of [
+        [env.document.docNo, env.document.docNoEvidence],
+        [env.document.date, env.document.dateEvidence],
+        [env.document.billTo, env.document.billToEvidence],
+        [env.document.jobRef, env.document.jobRefEvidence],
+      ] as const) {
+        if (!field[0]) continue;
+        expect(field[1]).not.toBeNull();
+        expect(field[1]?.sourceText).toContain(field[0]);
+        expect(pages[field[1]!.page - 1].text).toContain(field[1]!.sourceText);
       }
     }
   });
