@@ -68,6 +68,7 @@ export function ResultView({ envelope }: { envelope: Envelope }) {
         </div>
         {lineItems.length ? (
           <div className="table-scroll">
+            <p className="table-hint">Swipe sideways to see quantities, prices and evidence →</p>
             <table className="items-table">
               <thead>
                 <tr><th>Page</th><th>Code</th><th>Description</th><th>Qty</th><th>Unit</th><th>Unit price</th><th>Amount</th><th>Evidence</th></tr>

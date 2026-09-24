@@ -82,7 +82,8 @@ h1 em { color: var(--teal); font-family: Georgia, "Times New Roman", serif; font
 .failure-panel .eyebrow { color: var(--red); }
 .transport-failure { margin-top: -30px; }
 
-.result-stack { display: grid; gap: 26px; max-width: 1180px; margin: 0 auto; }
+.result-stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 26px; max-width: 1180px; margin: 0 auto; }
+.result-stack > *, .panel { min-width: 0; }
 .panel { padding: 26px; }
 .result-heading, .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 .file-heading { margin: 8px 0 0; font-size: clamp(23px, 3vw, 31px); letter-spacing: -.045em; overflow-wrap: anywhere; }
@@ -128,7 +129,8 @@ h1 em { color: var(--teal); font-family: Georgia, "Times New Roman", serif; font
 .quoted-source pre { padding: 8px; border-radius: 7px; background: rgba(255,255,255,.8); border: 1px solid var(--amber-line); }
 
 .items-panel { padding-bottom: 15px; }
-.table-scroll { overflow-x: auto; margin: 0 -26px; }
+.table-hint { display: none; }
+.table-scroll { max-width: calc(100% + 52px); overflow-x: auto; margin: 0 -26px; }
 .items-table { width: 100%; min-width: 900px; border-collapse: collapse; font-size: 12px; }
 .items-table th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .09em; font-weight: 800; background: #f4f7f3; }
 .items-table td, .items-table th { padding: 13px 11px; text-align: left; vertical-align: top; border-bottom: 1px solid #e9ece7; }
@@ -171,6 +173,7 @@ h1 em { color: var(--teal); font-family: Georgia, "Times New Roman", serif; font
   .stats-grid > div { padding-right: 8px; }
   .stats-grid > div + div { padding-left: 10px; }
   .table-scroll { margin: 0 -18px; }
+  .table-hint { display: block; position: sticky; left: 0; width: 100%; margin: 0; padding: 9px 18px; color: var(--muted); background: #f6f8f5; font-size: 11px; }
   .items-table td:first-child, .items-table th:first-child { padding-left: 18px; }
   .items-table td:last-child, .items-table th:last-child { padding-right: 18px; }
   .totals-grid { grid-template-columns: 1fr; }
