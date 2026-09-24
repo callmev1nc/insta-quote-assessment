@@ -62,7 +62,7 @@ h1 em { color: var(--teal); font-family: Georgia, "Times New Roman", serif; font
 .primary-button:hover:not(:disabled) { background: var(--teal-dark); }
 .samples-heading { display: flex; justify-content: space-between; gap: 10px; margin: 23px 0 10px; font-size: 12px; font-weight: 800; }
 .samples-heading span:last-child { color: var(--muted); font-size: 11px; font-weight: 400; }
-.sample-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.sample-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .sample-button { min-height: 66px; padding: 10px; background: #fff; border: 1px solid var(--line); border-radius: 9px; text-align: left; }
 .sample-button:hover:not(:disabled) { border-color: var(--teal); background: var(--teal-soft); }
 .sample-button strong, .sample-button span { display: block; }

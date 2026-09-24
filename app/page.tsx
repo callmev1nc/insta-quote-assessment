@@ -10,7 +10,10 @@ type Status = "idle" | "loading" | "done" | "transport-error";
 const samples = [
   { name: "Clean invoice", detail: "All values traced", file: "IB-55871.pdf" },
   { name: "Scanned page", detail: "Nothing guessed", file: "IB-55902.pdf" },
-  { name: "Conflicting counts", detail: "Disagreement shown", file: "IB-56088.pdf" },
+  { name: "Ambiguous weights", detail: "Amounts withheld", file: "IB-56010.pdf" },
+  { name: "Conflicting counts", detail: "Both statements shown", file: "IB-56088.pdf" },
+  { name: "Wrong printed total", detail: "Mismatch explained", file: "IB-56150.pdf" },
+  { name: "Eight-page statement", detail: "Page 4 refused; others kept", file: "IB-STMT47.pdf" },
 ] as const;
 
 export default function Home() {
