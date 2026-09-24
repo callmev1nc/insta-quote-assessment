@@ -18,7 +18,7 @@ npm run build
 curl -F "file=@fixtures/IB-56088.pdf" http://localhost:3000/api/extract
 ```
 
-The demo page has one-click examples for a clean invoice, a scanned page, and a conflicting carton count. All six original PDFs are in `fixtures/` for local and API review.
+The demo page has one-click examples for **all six supplied PDFs**, including ambiguous weights, an incorrect printed total, and the eight-page statement with one refused page. Each example follows the same upload and extraction path as a file chosen from your device. The original PDFs are also in `fixtures/` for local and API review.
 
 ## What the API returns
 
